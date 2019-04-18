@@ -125,6 +125,12 @@ type FuncJob func()
 
 func (f FuncJob) Run() { f() }
 
+// AddFuncWithEntryID adds a func to the Cron to be run on the given schedule with entry id.
+// The spec is parsed using the time zone of this Cron instance as the default.
+func (c *Cron) AddFuncWithEntryID(spec string, cmd func(), entryID EntryID) error {
+	return c.AddJobWithEntryID(spec, FuncJob(cmd), entryID)
+}
+
 // AddFunc adds a func to the Cron to be run on the given schedule.
 // The spec is parsed using the time zone of this Cron instance as the default.
 // An opaque ID is returned that can be used to later remove it.
@@ -143,11 +149,31 @@ func (c *Cron) AddJob(spec string, cmd Job) (EntryID, error) {
 	return c.Schedule(schedule, cmd), nil
 }
 
+// AddJobWithEntryID adds a Job to the Cron to be run on the given schedule with entry id.
+// The spec is parsed using the time zone of this Cron instance as the default.
+func (c *Cron) AddJobWithEntryID(spec string, cmd Job, entryID EntryID) error {
+	schedule, err := c.parser.Parse(spec)
+	if err != nil {
+		return err
+	}
+
+	c.ScheduleWithEntryID(schedule, cmd, entryID)
+
+	return nil
+}
+
 // Schedule adds a Job to the Cron to be run on the given schedule.
 func (c *Cron) Schedule(schedule Schedule, cmd Job) EntryID {
 	c.nextID = EntryID{bson.NewObjectId()}
+	entryID := c.nextID
+	c.ScheduleWithEntryID(schedule, cmd, entryID)
+	return entryID
+}
+
+// Schedule adds a Job to the Cron to be run on the given schedule with entry id.
+func (c *Cron) ScheduleWithEntryID(schedule Schedule, cmd Job, entryID EntryID) {
 	entry := &Entry{
-		ID:       c.nextID,
+		ID:       entryID,
 		Schedule: schedule,
 		Job:      cmd,
 	}
@@ -156,7 +182,6 @@ func (c *Cron) Schedule(schedule Schedule, cmd Job) EntryID {
 	} else {
 		c.add <- entry
 	}
-	return entry.ID
 }
 
 // Entries returns a snapshot of the cron entries.
