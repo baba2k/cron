@@ -6,6 +6,8 @@ import (
 	"runtime"
 	"sort"
 	"time"
+
+	"github.com/globalsign/mgo/bson"
 )
 
 // Cron keeps track of any number of entries, invoking the associated func as
@@ -37,7 +39,9 @@ type Schedule interface {
 }
 
 // EntryID identifies an entry within a Cron instance
-type EntryID int
+type EntryID struct {
+	bson.ObjectId
+}
 
 // Entry consists of a schedule and the func to execute on that schedule.
 type Entry struct {
@@ -60,7 +64,7 @@ type Entry struct {
 }
 
 // Valid returns true if this is not the zero entry.
-func (e Entry) Valid() bool { return e.ID != 0 }
+func (e Entry) Valid() bool { return e.ID.Valid() }
 
 // byTime is a wrapper for sorting the entry array by time
 // (with zero time at the end).
@@ -134,14 +138,14 @@ func (c *Cron) AddFunc(spec string, cmd func()) (EntryID, error) {
 func (c *Cron) AddJob(spec string, cmd Job) (EntryID, error) {
 	schedule, err := c.parser.Parse(spec)
 	if err != nil {
-		return 0, err
+		return EntryID{}, err
 	}
 	return c.Schedule(schedule, cmd), nil
 }
 
 // Schedule adds a Job to the Cron to be run on the given schedule.
 func (c *Cron) Schedule(schedule Schedule, cmd Job) EntryID {
-	c.nextID++
+	c.nextID = EntryID{bson.NewObjectId()}
 	entry := &Entry{
 		ID:       c.nextID,
 		Schedule: schedule,
