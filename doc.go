@@ -8,6 +8,7 @@ them in their own goroutines.
 
 	c := cron.New()
 	c.AddFunc("0 30 * * * *", func() { fmt.Println("Every hour on the half hour") })
+	c.AddFunc("CRON_TZ=Asia/Tokyo 30 04 * * * *", func() { fmt.Println("Runs at 04:30 Tokyo time every day") })
 	c.AddFunc("@hourly",      func() { fmt.Println("Every hour") })
 	c.AddFunc("@every 1h30m", func() { fmt.Println("Every hour thirty") })
 	c.Start()
@@ -24,19 +25,33 @@ them in their own goroutines.
 
 CRON Expression Format
 
-A cron expression represents a set of times, using 6 space-separated fields.
+A cron expression represents a set of times, using 5 space-separated fields.
 
 	Field name   | Mandatory? | Allowed values  | Allowed special characters
 	----------   | ---------- | --------------  | --------------------------
-	Seconds      | Yes        | 0-59            | * / , -
 	Minutes      | Yes        | 0-59            | * / , -
 	Hours        | Yes        | 0-23            | * / , -
 	Day of month | Yes        | 1-31            | * / , - ?
 	Month        | Yes        | 1-12 or JAN-DEC | * / , -
 	Day of week  | Yes        | 0-6 or SUN-SAT  | * / , - ?
 
-Note: Month and Day-of-week field values are case insensitive.  "SUN", "Sun",
-and "sun" are equally accepted.
+Month and Day-of-week field values are case insensitive.  "SUN", "Sun", and
+"sun" are equally accepted.
+
+The specific interpretation of the format is based on the Cron Wikipedia page:
+https://en.wikipedia.org/wiki/Cron
+
+Alternative Formats
+
+Alternative Cron expression formats support other fields like seconds. You can
+implement that by creating a custom Parser as follows.
+
+      cron.New(
+          cron.WithParser(
+              cron.SecondOptional | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor))
+
+The most popular alternative Cron expression format is Quartz:
+http://www.quartz-scheduler.org/documentation/quartz-2.x/tutorials/crontrigger.html
 
 Special Characters
 
@@ -84,7 +99,7 @@ You may use one of several pre-defined schedules in place of a cron expression.
 
 Intervals
 
-You may also schedule a job to execute at fixed intervals, starting at the time it's added 
+You may also schedule a job to execute at fixed intervals, starting at the time it's added
 or cron is run. This is supported by formatting the cron spec like this:
 
     @every <duration>
@@ -101,8 +116,35 @@ it will have only 2 minutes of idle time between each run.
 
 Time zones
 
-All interpretation and scheduling is done in the machine's local time zone (as
-provided by the Go time package (http://www.golang.org/pkg/time).
+By default, all interpretation and scheduling is done in the machine's local
+time zone (time.Local). You can specify a different time zone on construction:
+
+      cron.New(
+          cron.WithLocation(time.UTC))
+
+Individual cron schedules may also override the time zone they are to be
+interpreted in by providing an additional space-separated field at the beginning
+of the cron spec, of the form "CRON_TZ=Asia/Tokyo".
+
+For example:
+
+	# Runs at 6am in time.Local
+	cron.New().AddFunc("0 6 * * ?", ...)
+
+	# Runs at 6am in America/New_York
+	nyc, _ := time.LoadLocation("America/New_York")
+	c := cron.New(cron.WithLocation(nyc))
+	c.AddFunc("0 6 * * ?", ...)
+
+	# Runs at 6am in Asia/Tokyo
+	cron.New().AddFunc("CRON_TZ=Asia/Tokyo 0 6 * * ?", ...)
+
+	# Runs at 6am in Asia/Tokyo
+	c := cron.New(cron.WithLocation(nyc))
+	c.SetLocation("America/New_York")
+	c.AddFunc("CRON_TZ=Asia/Tokyo 0 6 * * ?", ...)
+
+The prefix "TZ=(TIME ZONE)" is also supported for legacy compatibility.
 
 Be aware that jobs scheduled during daylight-savings leap-ahead transitions will
 not be run!

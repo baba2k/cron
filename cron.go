@@ -2,9 +2,12 @@ package cron
 
 import (
 	"log"
+	"os"
 	"runtime"
 	"sort"
 	"time"
+
+	"github.com/globalsign/mgo/bson"
 )
 
 // Cron keeps track of any number of entries, invoking the associated func as
@@ -14,10 +17,13 @@ type Cron struct {
 	entries  []*Entry
 	stop     chan struct{}
 	add      chan *Entry
-	snapshot chan []*Entry
+	remove   chan EntryID
+	snapshot chan []Entry
 	running  bool
-	ErrorLog *log.Logger
+	logger   *log.Logger
 	location *time.Location
+	parser   Parser
+	nextID   EntryID
 }
 
 // Job is an interface for submitted cron jobs.
@@ -25,29 +31,40 @@ type Job interface {
 	Run()
 }
 
-// The Schedule describes a job's duty cycle.
+// Schedule describes a job's duty cycle.
 type Schedule interface {
-	// Return the next activation time, later than the given time.
+	// Next returns the next activation time, later than the given time.
 	// Next is invoked initially, and then each time the job is run.
 	Next(time.Time) time.Time
 }
 
+// EntryID identifies an entry within a Cron instance
+type EntryID struct {
+	bson.ObjectId
+}
+
 // Entry consists of a schedule and the func to execute on that schedule.
 type Entry struct {
-	// The schedule on which this job should be run.
+	// ID is the cron-assigned ID of this entry, which may be used to look up a
+	// snapshot or remove it.
+	ID EntryID
+
+	// Schedule on which this job should be run.
 	Schedule Schedule
 
-	// The next time the job will run. This is the zero time if Cron has not been
+	// Next time the job will run, or the zero time if Cron has not been
 	// started or this entry's schedule is unsatisfiable
 	Next time.Time
 
-	// The last time this job was run. This is the zero time if the job has never
-	// been run.
+	// Prev is the last time this job was run, or the zero time if never.
 	Prev time.Time
 
-	// The Job to run.
+	// Job is the thing to run when the Schedule is activated.
 	Job Job
 }
+
+// Valid returns true if this is not the zero entry.
+func (e Entry) Valid() bool { return e.ID.Valid() }
 
 // byTime is a wrapper for sorting the entry array by time
 // (with zero time at the end).
@@ -68,64 +85,110 @@ func (s byTime) Less(i, j int) bool {
 	return s[i].Next.Before(s[j].Next)
 }
 
-// New returns a new Cron job runner, in the Local time zone.
-func New() *Cron {
-	return NewWithLocation(time.Now().Location())
-}
-
-// NewWithLocation returns a new Cron job runner.
-func NewWithLocation(location *time.Location) *Cron {
-	return &Cron{
+// New returns a new Cron job runner, modified by the given options.
+//
+// Available Settings
+//
+//   Time Zone
+//     Description: The time zone in which schedules are interpreted
+//     Default:     time.Local
+//
+//   PanicLogger
+//     Description: How to log Jobs that panic
+//     Default:     Log the panic to os.Stderr
+//
+//   Parser
+//     Description:
+//     Default:     Parser that accepts the spec described here: https://en.wikipedia.org/wiki/Cron
+//
+// See "cron.With*" to modify the default behavior.
+func New(opts ...Option) *Cron {
+	c := &Cron{
 		entries:  nil,
 		add:      make(chan *Entry),
 		stop:     make(chan struct{}),
-		snapshot: make(chan []*Entry),
+		snapshot: make(chan []Entry),
+		remove:   make(chan EntryID),
 		running:  false,
-		ErrorLog: nil,
-		location: location,
+		logger:   log.New(os.Stderr, "", log.LstdFlags),
+		location: time.Local,
+		parser:   standardParser,
 	}
+	for _, opt := range opts {
+		opt(c)
+	}
+	return c
 }
 
-// A wrapper that turns a func() into a cron.Job
+// FuncJob is a wrapper that turns a func() into a cron.Job
 type FuncJob func()
 
 func (f FuncJob) Run() { f() }
 
+// AddFuncWithEntryID adds a func to the Cron to be run on the given schedule with entry id.
+// The spec is parsed using the time zone of this Cron instance as the default.
+func (c *Cron) AddFuncWithEntryID(spec string, cmd func(), entryID EntryID) error {
+	return c.AddJobWithEntryID(spec, FuncJob(cmd), entryID)
+}
+
 // AddFunc adds a func to the Cron to be run on the given schedule.
-func (c *Cron) AddFunc(spec string, cmd func()) error {
+// The spec is parsed using the time zone of this Cron instance as the default.
+// An opaque ID is returned that can be used to later remove it.
+func (c *Cron) AddFunc(spec string, cmd func()) (EntryID, error) {
 	return c.AddJob(spec, FuncJob(cmd))
 }
 
 // AddJob adds a Job to the Cron to be run on the given schedule.
-func (c *Cron) AddJob(spec string, cmd Job) error {
-	schedule, err := Parse(spec)
+// The spec is parsed using the time zone of this Cron instance as the default.
+// An opaque ID is returned that can be used to later remove it.
+func (c *Cron) AddJob(spec string, cmd Job) (EntryID, error) {
+	schedule, err := c.parser.Parse(spec)
+	if err != nil {
+		return EntryID{}, err
+	}
+	return c.Schedule(schedule, cmd), nil
+}
+
+// AddJobWithEntryID adds a Job to the Cron to be run on the given schedule with entry id.
+// The spec is parsed using the time zone of this Cron instance as the default.
+func (c *Cron) AddJobWithEntryID(spec string, cmd Job, entryID EntryID) error {
+	schedule, err := c.parser.Parse(spec)
 	if err != nil {
 		return err
 	}
-	c.Schedule(schedule, cmd)
+
+	c.ScheduleWithEntryID(schedule, cmd, entryID)
+
 	return nil
 }
 
 // Schedule adds a Job to the Cron to be run on the given schedule.
-func (c *Cron) Schedule(schedule Schedule, cmd Job) {
+func (c *Cron) Schedule(schedule Schedule, cmd Job) EntryID {
+	c.nextID = EntryID{bson.NewObjectId()}
+	entryID := c.nextID
+	c.ScheduleWithEntryID(schedule, cmd, entryID)
+	return entryID
+}
+
+// Schedule adds a Job to the Cron to be run on the given schedule with entry id.
+func (c *Cron) ScheduleWithEntryID(schedule Schedule, cmd Job, entryID EntryID) {
 	entry := &Entry{
+		ID:       entryID,
 		Schedule: schedule,
 		Job:      cmd,
 	}
 	if !c.running {
 		c.entries = append(c.entries, entry)
-		return
+	} else {
+		c.add <- entry
 	}
-
-	c.add <- entry
 }
 
 // Entries returns a snapshot of the cron entries.
-func (c *Cron) Entries() []*Entry {
+func (c *Cron) Entries() []Entry {
 	if c.running {
 		c.snapshot <- nil
-		x := <-c.snapshot
-		return x
+		return <-c.snapshot
 	}
 	return c.entrySnapshot()
 }
@@ -135,7 +198,26 @@ func (c *Cron) Location() *time.Location {
 	return c.location
 }
 
-// Start the cron scheduler in its own go-routine, or no-op if already started.
+// Entry returns a snapshot of the given entry, or nil if it couldn't be found.
+func (c *Cron) Entry(id EntryID) Entry {
+	for _, entry := range c.Entries() {
+		if id == entry.ID {
+			return entry
+		}
+	}
+	return Entry{}
+}
+
+// Remove an entry from being run in the future.
+func (c *Cron) Remove(id EntryID) {
+	if c.running {
+		c.remove <- id
+	} else {
+		c.removeEntry(id)
+	}
+}
+
+// Start the cron scheduler in its own goroutine, or no-op if already started.
 func (c *Cron) Start() {
 	if c.running {
 		return
@@ -165,7 +247,7 @@ func (c *Cron) runWithRecovery(j Job) {
 	j.Run()
 }
 
-// Run the scheduler. this is private just due to the need to synchronize
+// run the scheduler.. this is private just due to the need to synchronize
 // access to the 'running' state variable.
 func (c *Cron) run() {
 	// Figure out the next activation times for each entry.
@@ -214,6 +296,10 @@ func (c *Cron) run() {
 			case <-c.stop:
 				timer.Stop()
 				return
+
+			case id := <-c.remove:
+				timer.Stop()
+				c.removeEntry(id)
 			}
 
 			break
@@ -221,13 +307,14 @@ func (c *Cron) run() {
 	}
 }
 
+// now returns current time in c location
+func (c *Cron) now() time.Time {
+	return time.Now().In(c.location)
+}
+
 // Logs an error to stderr or to the configured error log
 func (c *Cron) logf(format string, args ...interface{}) {
-	if c.ErrorLog != nil {
-		c.ErrorLog.Printf(format, args...)
-	} else {
-		log.Printf(format, args...)
-	}
+	c.logger.Printf(format, args...)
 }
 
 // Stop stops the cron scheduler if it is running; otherwise it does nothing.
@@ -240,20 +327,20 @@ func (c *Cron) Stop() {
 }
 
 // entrySnapshot returns a copy of the current cron entry list.
-func (c *Cron) entrySnapshot() []*Entry {
-	entries := []*Entry{}
-	for _, e := range c.entries {
-		entries = append(entries, &Entry{
-			Schedule: e.Schedule,
-			Next:     e.Next,
-			Prev:     e.Prev,
-			Job:      e.Job,
-		})
+func (c *Cron) entrySnapshot() []Entry {
+	var entries = make([]Entry, len(c.entries))
+	for i, e := range c.entries {
+		entries[i] = *e
 	}
 	return entries
 }
 
-// now returns current time in c location
-func (c *Cron) now() time.Time {
-	return time.Now().In(c.location)
+func (c *Cron) removeEntry(id EntryID) {
+	var entries []*Entry
+	for _, e := range c.entries {
+		if e.ID != id {
+			entries = append(entries, e)
+		}
+	}
+	c.entries = entries
 }
