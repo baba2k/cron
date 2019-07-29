@@ -1,3 +1,3 @@
-module gopkg.in/baba2k/cron.v4
+module github.com/baba2k/cron
 
 go 1.12
