@@ -1,6 +1,8 @@
 package cron
 
-import "time"
+import (
+	"time"
+)
 
 // SpecSchedule specifies a duty cycle (to the second granularity), based on a
 // traditional crontab specification. It is computed initially and stored as bit sets.
@@ -22,8 +24,11 @@ var (
 	seconds = bounds{0, 59, nil}
 	minutes = bounds{0, 59, nil}
 	hours   = bounds{0, 23, nil}
-	dom     = bounds{1, 31, nil}
-	months  = bounds{1, 12, map[string]uint{
+	dom     = bounds{1, 32, map[string]uint{
+		"l":    32,
+		"last": 32,
+	}}
+	months = bounds{1, 12, map[string]uint{
 		"jan": 1,
 		"feb": 2,
 		"mar": 3,
@@ -51,6 +56,7 @@ var (
 const (
 	// Set the top bit if a star was included in the expression.
 	starBit = 1 << 63
+	lastDay = 4294967296
 )
 
 // Next returns the next time this schedule is activated, greater than the given
@@ -109,38 +115,44 @@ WRAP:
 		}
 	}
 
-	// Now get a day in that month.
-	//
-	// NOTE: This causes issues for daylight savings regimes where midnight does
-	// not exist.  For example: Sao Paulo has DST that transforms midnight on
-	// 11/3 into 1am. Handle that by noticing when the Hour ends up != 0.
-	for !dayMatches(s, t) {
-		if !added {
-			added = true
-			t = time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, loc)
-		}
-		t = t.AddDate(0, 0, 1)
-		// Notice if the hour is no longer midnight due to DST.
-		// Add an hour if it's 23, subtract an hour if it's 1.
-		if t.Hour() != 0 {
-			if t.Hour() > 12 {
-				t = t.Add(time.Duration(24-t.Hour()) * time.Hour)
-			} else {
-				t = t.Add(time.Duration(-t.Hour()) * time.Hour)
+	if int(s.Dom) == lastDay {
+		t = time.Date(t.Year(), t.Month()+1, 1, t.Hour(), t.Minute(), t.Second(), t.Nanosecond(), loc).AddDate(0, 0, -1)
+	} else {
+		// Now get a day in that month.
+		//
+		// NOTE: This causes issues for daylight savings regimes where midnight does
+		// not exist.  For example: Sao Paulo has DST that transforms midnight on
+		// 11/3 into 1am. Handle that by noticing when the Hour ends up != 0.
+		for !dayMatches(s, t) {
+			if !added {
+				added = true
+				t = time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, loc)
 			}
-		}
+			t = t.AddDate(0, 0, 1)
+			// Notice if the hour is no longer midnight due to DST.
+			// Add an hour if it's 23, subtract an hour if it's 1.
+			if t.Hour() != 0 {
+				if t.Hour() > 12 {
+					t = t.Add(time.Duration(24-t.Hour()) * time.Hour)
+				} else {
+					t = t.Add(time.Duration(-t.Hour()) * time.Hour)
+				}
+			}
 
-		if t.Day() == 1 {
-			goto WRAP
+			if t.Day() == 1 {
+				goto WRAP
+			}
 		}
 	}
 
+	// fmt.Println("Before 1 hour:", t.String())
 	for 1<<uint(t.Hour())&s.Hour == 0 {
 		if !added {
 			added = true
 			t = time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), 0, 0, 0, loc)
 		}
 		t = t.Add(1 * time.Hour)
+		// fmt.Println("Add 1 hour:", t.String())
 
 		if t.Hour() == 0 {
 			goto WRAP

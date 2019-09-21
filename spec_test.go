@@ -1,6 +1,7 @@
 package cron
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -63,6 +64,37 @@ func TestActivation(t *testing.T) {
 			continue
 		}
 		actual := sched.Next(getTime(test.time).Add(-1 * time.Second))
+		fmt.Println(actual)
+		expected := getTime(test.time)
+		if test.expected && expected != actual || !test.expected && expected == actual {
+			t.Errorf("Fail evaluating %s on %s: (expected) %s != %s (actual)",
+				test.spec, test.time, expected, actual)
+		}
+	}
+}
+
+func TestLastDayOfMonth(t *testing.T) {
+	tests := []struct {
+		time, spec string
+		expected   bool
+	}{
+		{"Sun Jul 15 00:00 2012", "* * l * *", true},
+		{"Fri Jun 15 00:00 2012", "* * l * *", false},
+		{"Sun Jul 15 00:00 2012", "* * 32 * *", false},
+		{"Sun Jul 15 00:00 2012", "0 5 l * *", false},
+		{"Sun Jul 31 00:00 2012", "* * l * *", true},
+		{"Sun Jul 31 00:00 2012", "0 5 l * *", false},
+		{"Sun Jul 31 05:00 2012", "0 4 l * *", false},
+	}
+
+	for _, test := range tests {
+		sched, err := ParseStandard(test.spec)
+		if err != nil {
+			t.Error(err)
+			continue
+		}
+		actual := sched.Next(getTime(test.time).Add(-1 * time.Second))
+		fmt.Println(actual)
 		expected := getTime(test.time)
 		if test.expected && expected != actual || !test.expected && expected == actual {
 			t.Errorf("Fail evaluating %s on %s: (expected) %s != %s (actual)",
