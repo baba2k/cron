@@ -76,15 +76,15 @@ func TestActivation(t *testing.T) {
 func TestLastDayOfMonth(t *testing.T) {
 	tests := []struct {
 		time, spec string
-		expected   bool
+		expected   string
 	}{
-		{"Sun Jul 15 00:00 2012", "* * l * *", true},
-		{"Fri Jun 15 00:00 2012", "* * l * *", false},
-		{"Sun Jul 15 00:00 2012", "* * 32 * *", false},
-		{"Sun Jul 15 00:00 2012", "0 5 l * *", false},
-		{"Sun Jul 31 00:00 2012", "* * l * *", true},
-		{"Sun Jul 31 00:00 2012", "0 5 l * *", false},
-		{"Sun Jul 31 05:00 2012", "0 4 l * *", false},
+		{"Sun Jul 15 00:00 2012", "* * l * *", "2012-07-31T00:00:00+0200"},
+		{"Fri Jun 15 00:00 2012", "* * l * *", "2012-06-30T00:00:00+0200"},
+		{"Sun Jul 15 00:00 2012", "* * 32 * *", "2012-07-31T00:00:00+0200"},
+		{"Sun Jul 15 00:00 2012", "0 5 l * *", "2012-07-31T05:00:00+0200"},
+		{"Sun Jul 31 00:00 2012", "* * l * *", "2012-07-31T00:00:00+0200"},
+		{"Sun Jul 31 00:00 2012", "0 5 l * *", "2012-07-31T05:00:00+0200"},
+		{"Sun Jul 31 05:00 2012", "0 4 l * *", "2012-08-31T04:00:00+0200"},
 	}
 
 	for _, test := range tests {
@@ -94,9 +94,8 @@ func TestLastDayOfMonth(t *testing.T) {
 			continue
 		}
 		actual := sched.Next(getTime(test.time).Add(-1 * time.Second))
-		fmt.Println(actual)
-		expected := getTime(test.time)
-		if test.expected && expected != actual || !test.expected && expected == actual {
+		expected := getTime(test.expected)
+		if expected != actual {
 			t.Errorf("Fail evaluating %s on %s: (expected) %s != %s (actual)",
 				test.spec, test.time, expected, actual)
 		}
